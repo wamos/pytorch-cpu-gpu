@@ -8,6 +8,7 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import multiprocessing as mp
 from time import sleep
+import copy
 
 
 class Net(nn.Module):
@@ -56,27 +57,28 @@ def train(args, model, device, train_loader, optimizer, epoch):
 
 
 def test(model, device, test_loader, conn, epochs):
-    model.to('cpu')
     current_epoch = 0
     while(current_epoch < epochs):
-        if(conn.poll()):
-            model.state_dict = conn.recv()
+        if(conn.poll()):            
+            state_dict = conn.recv()
+            model.load_state_dict(state_dict)
             print("recv from training process!")
             current_epoch = current_epoch + 1
         else:
             continue
 
         # Print model's state_dict
-        print("Model's state_dict:")
-        for param_tensor in model.state_dict:
-            print(param_tensor, "\t", model.state_dict[param_tensor].size())  
+        print("Model state_dict on CPU:")
+        for k, v in model.state_dict().items():
+            print(k, "\t", v.size())
+            # print(param_tensor, "\t", type(model.state_dict[param_tensor]))
+            # print(k, "\t", v)
     
         model.eval()
         test_loss = 0
         correct = 0
         with torch.no_grad():
             for data, target in test_loader:
-                data, target = data, target
                 output = model(data)
                 test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
                 pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
@@ -84,9 +86,31 @@ def test(model, device, test_loader, conn, epochs):
 
         test_loss /= len(test_loader.dataset)
 
-        print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        print('\nTest set on CPU: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
             test_loss, correct, len(test_loader.dataset),
             100. * correct / len(test_loader.dataset)))
+
+def test_on_gpu(model, device, test_loader):
+    model.eval()
+    test_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+    test_loss /= len(test_loader.dataset)
+
+    print("Model state_dict on GPU:")
+    for k, v in model.state_dict().items():
+        print(k, "\t", v.size())
+
+    print('\nTest set on GPU: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
+        100. * correct / len(test_loader.dataset)))
 
 
 def main():
@@ -96,7 +120,7 @@ def main():
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=3, metavar='N',
+    parser.add_argument('--epochs', type=int, default=10, metavar='N',
                         help='number of epochs to train (default: 14)')
     parser.add_argument('--lr', type=float, default=1.0, metavar='LR',
                         help='learning rate (default: 1.0)')
@@ -140,7 +164,7 @@ def main():
     train_loader = torch.utils.data.DataLoader(dataset1,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
-    model = Net().to(device)
+    model = Net()
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
@@ -149,18 +173,27 @@ def main():
     parent_conn, child_conn = mp.Pipe()
     mp.set_start_method('spawn')
     inf_device = torch.device("cpu")
-    inf_process = mp.Process(target=test, args=(model, inf_device, test_loader, child_conn, args.epochs))
-
+    copy_model = Net()
+    copy_model.cpu()
+    inf_process = mp.Process(target=test, args=(copy_model, inf_device, test_loader, child_conn, args.epochs))
     inf_started=False
+
+    model.to(device) # move to GPU
+    cpu_state_dict = {}
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
-        state_dict = model.state_dict()
+        train(args, model, device, train_loader, optimizer, epoch)        
+
+        # cpu_state_dict['epoch'] = epoch
+        for k, v in model.state_dict().items():
+            cpu_state_dict[k] = v.cpu()
+                
         if inf_started == False:
             inf_process.start() ## BUG: you can't start this process twice!
             inf_started = True
         sleep(0.5)
-        parent_conn.send(state_dict)
-        # test(model, device, test_loader)
+        parent_conn.send(cpu_state_dict) # BUG weights on CPU aren't updated as on GPU.
+        # model.to(device) # move back to GPU
+        test_on_gpu(model, device, test_loader)
         scheduler.step()
     
     print("break from for loop")
