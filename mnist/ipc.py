@@ -71,7 +71,6 @@ def test(model, device, test_loader, conn, epochs):
         print("Model state_dict on CPU:")
         for k, v in model.state_dict().items():
             print(k, "\t", v.size())
-            # print(param_tensor, "\t", type(model.state_dict[param_tensor]))
             # print(k, "\t", v)
     
         model.eval()
@@ -188,11 +187,11 @@ def main():
             cpu_state_dict[k] = v.cpu()
                 
         if inf_started == False:
-            inf_process.start() ## BUG: you can't start this process twice!
+            inf_process.start()
             inf_started = True
+
         sleep(0.5)
-        parent_conn.send(cpu_state_dict) # BUG weights on CPU aren't updated as on GPU.
-        # model.to(device) # move back to GPU
+        parent_conn.send(cpu_state_dict)
         test_on_gpu(model, device, test_loader)
         scheduler.step()
     
