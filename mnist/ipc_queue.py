@@ -53,18 +53,19 @@ def train(args, model, device, train_loader, optimizer, epoch):
         #         100. * batch_idx / len(train_loader), loss.item()))
         #     if args.dry_run:
         #         break
-    print("training epoch ends %d", epoch)
+    print("training epoch ", epoch, " ends")
 
 
-def test(model, device, test_loader, conn, epochs):
+def test(model, device, test_loader, queue, epochs):
     current_epoch = 0
     while(current_epoch < epochs):
-        if(conn.poll()):            
-            state_dict = conn.recv()
+        if(queue.empty() == False):
+            state_dict = queue.get()
             model.load_state_dict(state_dict)
             print("recv from training process!")
             current_epoch = current_epoch + 1
         else:
+            # print("queue is empty!")
             continue
 
         # Print model's state_dict
@@ -168,13 +169,13 @@ def main():
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
-    # set up the pipe and child process for inference, i.e. test
-    parent_conn, child_conn = mp.Pipe()
+    # set up the mp.Queue and child process for inference, i.e. test
     mp.set_start_method('spawn')
+    ipc_queue = mp.Queue()    
     inf_device = torch.device("cpu")
     copy_model = Net()
     copy_model.cpu()
-    inf_process = mp.Process(target=test, args=(copy_model, inf_device, test_loader, child_conn, args.epochs))
+    inf_process = mp.Process(target=test, args=(copy_model, inf_device, test_loader, ipc_queue, args.epochs))
     inf_started=False
 
     model.to(device) # move to GPU
@@ -191,7 +192,7 @@ def main():
             inf_started = True
 
         sleep(0.5)
-        parent_conn.send(cpu_state_dict)
+        ipc_queue.put(cpu_state_dict)
         test_on_gpu(model, device, test_loader)
         scheduler.step()
     
